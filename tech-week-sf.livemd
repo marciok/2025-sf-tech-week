@@ -1,0 +1,352 @@
+# Tech Week Sandobx
+
+```elixir
+Mix.install(
+  [
+    {:jason, "~> 1.4"},
+    {:req, "~> 0.4.0"},
+    {:kino_maplibre, "~> 0.1.12"},
+    {:kino_vega_lite, "~> 0.1.11"},
+    {:kino_explorer, "~> 0.1.20"},
+    {:kino_db, "~> 0.2.10"},
+    {:exqlite, "~> 0.23.0"},
+    {:kino_bumblebee, "~> 0.5.0"},
+    {:exla, ">= 0.0.0"}
+  ],
+  config: [nx: [default_backend: EXLA.Backend]]
+)
+```
+
+## 🔄 Setup Events Data
+
+```elixir
+defmodule FetchPartiful do
+  
+  
+  def event(id) do
+    dep_id = "IzxbLzegVaPnJCL2ITYh3" # ‼️ Find on your Chrome and fill here
+    req =
+    Req.new(
+      url:
+        "https://partiful.com/_next/data/#{dep_id}/e/#{id}.json?event=#{id}",
+      headers: %{
+        "accept" => "*/*",
+        "accept-language" => "en-US,en;q=0.9,pt-BR;q=0.8,pt;q=0.7",
+        "baggage" =>
+          "sentry-environment=production,sentry-public_key=a40d6ab4dc316ec1074dd0b0fbc0ce32,sentry-trace_id=39673fa72aa042689707e715e259a8af,sentry-sample_rate=0.05,sentry-sampled=false",
+        "cookie" => "", # ‼️ Find on your Chrome and fill here
+      }
+    )
+    
+    Req.get!(req).body
+  end
+    
+  def rspv(token) do
+    req =
+      Req.new(
+        url: "https://api.partiful.com/getMyRsvps",
+        headers: %{
+          "accept" => "*/*",
+          "accept-language" => "en-US,en;q=0.9,pt-BR;q=0.8,pt;q=0.7",
+          "authorization" => "Bearer #{token}",
+          "content-type" => "application/json",
+          "origin" => "https://partiful.com",
+          "priority" => "u=1, i",
+          "referer" => "https://partiful.com/",
+          "sec-ch-ua" => ~s("Chromium";v="140", "Not=A?Brand";v="24", "Google Chrome";v="140"),
+          "sec-ch-ua-mobile" => "?0",
+          "sec-ch-ua-platform" => ~s("macOS"),
+          "sec-fetch-dest" => "empty",
+          "sec-fetch-mode" => "cors",
+          "sec-fetch-site" => "same-site",
+          "user-agent" => "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+        },
+        json: %{
+          "data" => %{
+            "params" => %{},
+            "amplitudeDeviceId" => "", # ‼️ Find on your Chrome and fill here
+            "userId" => "" #  ‼️ Find on your Chrome and fill here
+          }
+        }
+      )
+    
+    # Req.post!(req).body["result"]["data"]["events"]
+    case Req.post!(req).body do
+      %{"error" => error} ->
+        raise "Not able to fetch data: #{Jason.encode!(error)}"
+        body ->
+          body  
+    end
+  end
+end
+```
+
+## 📝 Fetch and Store Data
+
+```elixir
+tk = "" #  ‼️ Find on your Chrome and fill here
+rsvp = FetchPartiful.rspv(tk)
+json_data = Jason.encode!(rsvp, pretty: true)
+data_folder = "./Documents/partiful/"
+
+File.write!("#{data_folder}/rsvp.json", json_data)
+```
+
+```elixir
+rsvp = File.read!("#{data_folder}/rsvp.json")
+events = Jason.decode!(rsvp)["result"]["data"]["events"]
+Task.async_stream(events, fn
+  event ->
+    id = event["id"]
+    e_data = FetchPartiful.event(id)
+    json_data = Jason.encode!(e_data, pretty: true)
+    File.write!("#{data_folder}/events/#{id}.json", json_data)    
+end) |> Enum.to_list()
+
+```
+
+## 📊 Parse Events
+
+```elixir
+defmodule ParseEvent do
+  def coordinates(nil), do: nil
+  def coordinates(url) do
+    params =
+      url
+      |> URI.parse()
+      |> Map.get(:query)
+      |> then(&URI.decode_query(&1 || ""))
+    IO.inspect(url)
+    IO.inspect(params)
+    sll = params["sll"]
+    if sll do
+      [{lon, ""}, {lat, ""}] = sll  |> String.split(",") |> Enum.map(& Float.parse(&1))    
+      {lon, lat}    
+    else
+      nil
+    end
+  end
+
+  def to_gpt(event) do
+    """
+    Title: #{event["title"]}
+    Date: #{event["startDate"]}
+    Description: #{event["description"]}
+    RSVP Status: #{event["status"]}
+    
+    """   
+  end
+end
+```
+
+```elixir
+data_folder = "./Documents/partiful/"
+
+rsvp = File.read!("#{data_folder}/rsvp.json")
+events = Jason.decode!(rsvp)["result"]["data"]["events"]
+envents_desc = Enum.map(events, fn
+  event ->    
+    data = File.read!("#{data_folder}/events/#{event["id"]}.json")
+    data = Jason.decode!(data)
+    context = ParseEvent.to_gpt(data["pageProps"]["event"])
+    context
+end)
+
+```
+
+```elixir
+data_folder = "./Documents/partiful/"
+
+rsvp = File.read!("#{data_folder}/rsvp.json")
+events = Jason.decode!(rsvp)["result"]["data"]["events"]
+envents_loc = Enum.map(events, fn
+  event ->    
+    data = File.read!("#{data_folder}/events/#{event["id"]}.json")
+    data = Jason.decode!(data)
+    url = data["pageProps"]["event"]["locationInfo"]["mapsInfo"]["appleMapsUrl"]
+
+    name = event["title"]
+    status = event["guest"]["status"]
+    case ParseEvent.coordinates(url) do
+      {lon, lat} ->
+        %{name: name, status: status, loc: {lon, lat}, id: event["id"]}
+      _ ->
+        nil
+    end
+end) |> Enum.reject(&is_nil/1)
+
+```
+
+```elixir
+defmodule Styles do
+  def color(status) do
+    %{  
+    "APPROVED" => "#006400",             
+    "GOING" => "#00008B",                
+    "PENDING_APPROVAL" => "#CC8400",     
+    "WAITLISTED_FOR_APPROVAL" => "#CC8400", 
+    "WITHDRAWN" => "#006400"             
+    } |> Map.get(status, "#000000")
+  end
+end
+```
+
+## 📊 RSVP Status
+
+```elixir
+data =
+  envents_loc
+  |> Enum.map(&Map.get(&1, :status))
+  |> Enum.frequencies()
+  |> Enum.map(fn {status, count} -> %{status: status, count: count} end)
+
+total = Enum.reduce(data, 0, fn %{count: c}, acc -> acc + c end)
+
+data =
+  Enum.map(data, fn %{status: s, count: c} ->
+    %{status: s, count: c, pct: c / max(total, 1)}
+  end)
+
+domain = Enum.map(data, & &1.status)
+range  = Enum.map(domain, &Styles.color/1)
+
+VegaLite.new(title: "RSVP Status")
+|> VegaLite.data_from_values(data, only: ["status", "count", "pct"])
+|> VegaLite.mark(:arc, inner_radius: 0)
+|> VegaLite.encode_field(:theta, "count", type: :quantitative, stack: :normalize)
+|> VegaLite.encode_field(:color, "status",
+     type: :nominal,
+     legend: [title: "Status"],
+     scale: [domain: domain, range: range]
+   )
+|> VegaLite.encode(:tooltip, [
+     [field: "status", type: :nominal,      title: "Status"],
+     [field: "count",  type: :quantitative, title: "Count"],
+     [field: "pct",    type: :quantitative, title: "Percent", format: ".1%"]
+   ])
+```
+
+```elixir
+alias MapLibre, as: Ml
+ml = MapLibre.new(style: :street, center: {-122.4194, 37.7749}, zoom: 13)  
+Enum.reduce(envents_loc, ml, fn %{loc: {lat, lon}, name: name, status: status, id: id}, sf_ml ->    
+  color = Styles.color(status)
+  
+  sf_ml |> Ml.add_source("#{id}_pin", %{
+    type: :geojson,
+    data: %{
+      type: "FeatureCollection",
+      features: [
+        %{
+          type: "Feature",
+          geometry: %{
+            type: "Point",
+            coordinates: [lon, lat] # lon, lat
+          },
+          properties: %{
+            title: name
+          }
+        }
+      ]
+    }
+  })
+  |> Ml.add_layer(%{
+    id: "#{id}_layer",
+    type: :symbol,
+    source: "#{id}_pin",
+    layout: %{
+      "icon-image" => "marker-15",  # built-in sprite icon
+      "icon-size" => 3.5,
+      "icon-anchor" => "bottom",
+      "text-field" => ["get", "title"],
+      "text-offset" => [0, 1.2],
+      "text-anchor" => "top"
+    },
+    paint: %{
+      "text-color" => color,
+      "text-halo-color" => "#fff",       # background outline
+      "text-halo-width" => 2      
+    }
+  })
+  |> Ml.add_layer(%{
+    id: "#{id}_pin_works_layer",
+    type: :circle,
+    source: "#{id}_pin",
+    paint: %{
+      "circle-radius" => 8,
+      "circle-color" => color,
+      "circle-stroke-width" => 2,
+      "circle-stroke-color" => "#FFFFFF"
+    }
+  })
+end)
+```
+
+```elixir
+defmodule ChatGPT do
+  def ask(question, events_desc) do
+    req =
+      Req.new(
+        url: "https://api.openai.com/v1/responses",
+        headers: [
+          {"content-type", "application/json"},
+          {"authorization", "Bearer "} #  ‼️ You need to fill with your OpenAI API Key
+        ]
+      )
+
+    input = """
+    <context>
+      You are an event organizer and this is list of all events:
+      #{events_desc}
+    </context>
+    
+    Now answer the question below, if you don't know the answer just say "I don't know :("
+
+    <question>#{question}</question>
+    
+    """
+    response =
+      Req.post!(req,
+        receive_timeout: 120_000,
+        json: %{
+          model: "gpt-5",
+          input: input
+        }
+      )
+
+    IO.inspect(response)
+    
+    response.body["output"] |> Enum.map(fn
+      %{"content" => contents} ->
+        contents |> Enum.reduce("", fn
+          content, acc ->
+            "#{acc} #{content["text"]}"
+        end)
+      _ ->
+        nil
+    end) |> Enum.join()    
+  end
+end
+```
+
+```elixir
+frame = Kino.Frame.new()
+```
+
+```elixir
+inputs = [
+    question: Kino.Input.text("Ask anything about the events"),
+]
+
+form = Kino.Control.form(inputs, submit: "Send", reset_on_submit: [:message])
+```
+
+```elixir
+Kino.listen(form, fn %{data: %{question: q}, origin: _origin} ->
+  content = Kino.Markdown.new("🙂 **Question**: #{q}")
+  Kino.Frame.append(frame, content)
+  response = ChatGPT.ask(q, envents_desc)
+  answer = Kino.Markdown.new("\n🤖**Answer**: #{response}")
+  Kino.Frame.append(frame, answer)
+end)
+```
