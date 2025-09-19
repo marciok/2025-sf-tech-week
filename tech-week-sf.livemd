@@ -1,4 +1,4 @@
-# Tech Week Sandobx
+# 2025 SF Tech Week 🌉
 
 ```elixir
 Mix.install(
